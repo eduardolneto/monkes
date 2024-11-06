@@ -294,6 +294,112 @@ class Field(eqx.Module):
         bsupv_mnc = file.variables["bsupvmnc"][:].filled()
         bsubu_mnc = file.variables["bsubumnc"][:].filled()
         bsubv_mnc = file.variables["bsubvmnc"][:].filled()
+        nfp = file.variables["nfp"][:].filled()
+        iota = file.variables["iotaf"][:].filled()
+        psi_s = file.variables["phi"][:].filled()
+        Psia = file.variables["phip"][:].filled()[-1]
+
+
+        # assuming the field is only over a single flux surface s
+        g_mnc = interpax.interp1d(s, s_half, g_mnc[1:,:])
+        b_mnc = interpax.interp1d(s, s_half, b_mnc[1:,:])
+        bsupu_mnc = interpax.interp1d(s, s_half, bsupu_mnc[1:,:])
+        bsupv_mnc = interpax.interp1d(s, s_half, bsupv_mnc[1:,:])
+        bsubu_mnc = interpax.interp1d(s, s_half, bsubu_mnc[1:,:])
+        bsubv_mnc = interpax.interp1d(s, s_half, bsubv_mnc[1:,:])
+        iota = -interpax.interp1d(s, s_full, iota)  # Not necessary but to match boozer we need it here
+
+        psi_s = interpax.interp1d(s, s_full, psi_s) # Not necessary? but to match boozer we need it here
+
+        #xm = file.variables["xm"][:].filled()
+        #xn = file.variables["xn"][:].filled()
+        xm = file.variables["xm_nyq"][:].filled()  
+        xn = file.variables["xn_nyq"][:].filled()  
+
+        sqrtg = vmec_eval(theta[:, None], zeta[None, :], g_mnc, 0, xm, xn)
+        Bmag = vmec_eval(theta[:, None], zeta[None, :], b_mnc, 0, xm, xn)
+        B_sub_t = vmec_eval(theta[:, None], zeta[None, :], bsubu_mnc, 0, xm, xn)
+        B_sub_z = vmec_eval(theta[:, None], zeta[None, :], bsubv_mnc, 0, xm, xn)                        
+        B_sup_t = vmec_eval(theta[:, None], zeta[None, :], bsupu_mnc, 0, xm, xn)
+        B_sup_z = vmec_eval(theta[:, None], zeta[None, :], bsupv_mnc, 0, xm, xn)    
+
+        #Copied from recent booz_xform reader changes but need to understand
+        B0 = jnp.abs(b_mnc).max()
+        mask = jnp.abs(b_mnc) > cutoff * B0
+
+        dBdt = vmec_eval(theta[:, None], zeta[None, :], b_mnc * mask, 0, xm, xn, dt=1)
+        dBdz = vmec_eval(theta[:, None], zeta[None, :], b_mnc * mask, 0, xm, xn, dz=1)
+
+
+        #print(B_sub_t)
+        #a_minor = R0 / aspect
+        #a_minor=2.01879
+        data = {}
+        data["sqrtg"] = sqrtg*Psia
+        data["Bmag"] = Bmag
+        data["dBdt"] = dBdt
+        data["dBdz"] = dBdz
+        data["B_sub_t"] = B_sub_t
+        data["B_sub_z"] = B_sub_z
+        data["B_sup_t"] = B_sup_t
+        data["B_sup_z"] = B_sup_z
+        data["psi_r"] = 2 * jnp.sqrt(s) / Aminor_p
+        data["iota"] = iota
+        data["B0"] = B0
+
+        return cls(rho=jnp.sqrt(s), **data, NFP=nfp, deriv_mode=deriv_mode)
+
+
+    @classmethod
+    def from_vmec_s(cls,
+        vmec,
+        s: float,
+        ntheta: int,
+        nzeta: int,
+        cutoff: float = 0.0,
+        deriv_mode: str = "fft",
+    ):
+        """Construct Field from BOOZ_XFORM file.
+
+        Parameters
+        ----------
+        vmec : path-like
+            Path to booz_xform wout file.
+        s : float
+            Flux surface label.
+        ntheta, nzeta : int
+            Number of points on a surface in poloidal and toroidal directions.
+        """
+        assert (ntheta % 2 == 1) and (nzeta % 2 == 1), "ntheta and nzeta must be odd"
+        from netCDF4 import Dataset
+
+        file = Dataset(vmec, mode="r")
+
+        ns = file.variables["ns"][:].filled()
+        nfp = file.variables["nfp"][:].filled()
+        #print('ns',ns)
+        #print('nfp',nfp)
+        theta = jnp.linspace(0, 2 * np.pi, ntheta, endpoint=False)
+        zeta = jnp.linspace(0, 2 * np.pi / nfp, nzeta, endpoint=False)
+        assert "bmns" not in file.variables, "non-symmetric booz-xform not supported"
+
+        s_full = jnp.linspace(0, 1, ns)
+        hs = 1 / (ns - 1)
+        s_half = s_full[0:-1] + hs / 2
+        #s_half = jnp.array([(i-0.5)/(ns-1) for i in range(1,ns)])
+        #print(s_half.shape)
+
+        volume = file.variables["volume_p"][:].filled()
+        Aminor_p = file.variables["Aminor_p"][:].filled()    
+        Rmajor_p = file.variables["Rmajor_p"][:].filled() 
+        aspect = file.variables["aspect"][:].filled()                   
+        r_mnc = file.variables["rmnc"][:].filled()
+        g_mnc = file.variables["gmnc"][:].filled()
+        b_mnc = file.variables["bmnc"][:].filled()
+        bsupu_mnc = file.variables["bsupumnc"][:].filled()
+        bsupv_mnc = file.variables["bsupvmnc"][:].filled()
+        bsubu_mnc = file.variables["bsubumnc"][:].filled()
+        bsubv_mnc = file.variables["bsubvmnc"][:].filled()
         #print(g_mnc[0,:])
         #print(g_mnc[1,:])
         nfp = file.variables["nfp"][:].filled()
@@ -350,11 +456,8 @@ class Field(eqx.Module):
         data["iota"] = iota
         data["B0"] = B0
 
-
-
-
-
         return cls(rho=jnp.sqrt(s), **data, NFP=nfp, deriv_mode=deriv_mode)
+
 
     @classmethod
     def from_booz_xform(

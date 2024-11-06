@@ -296,8 +296,8 @@ class Field(eqx.Module):
         bsubv_mnc = file.variables["bsubvmnc"][:].filled()
         nfp = file.variables["nfp"][:].filled()
         iota = file.variables["iotaf"][:].filled()
-        psi_s = file.variables["phi"][:].filled()
-        Psia = file.variables["phip"][:].filled()[-1]
+        psi_s = file.variables["phipf"][:].filled()
+        
 
 
         # assuming the field is only over a single flux surface s
@@ -309,8 +309,7 @@ class Field(eqx.Module):
         bsubv_mnc = interpax.interp1d(s, s_half, bsubv_mnc[1:,:])
         iota = -interpax.interp1d(s, s_full, iota)  # Not necessary but to match boozer we need it here
 
-        psi_s = interpax.interp1d(s, s_full, psi_s) # Not necessary? but to match boozer we need it here
-
+        psi_s = interpax.interp1d(s, s_full, psi_s)/(2.*jnp.pi) 
         #xm = file.variables["xm"][:].filled()
         #xn = file.variables["xn"][:].filled()
         xm = file.variables["xm_nyq"][:].filled()  
@@ -335,7 +334,7 @@ class Field(eqx.Module):
         #a_minor = R0 / aspect
         #a_minor=2.01879
         data = {}
-        data["sqrtg"] = sqrtg*Psia
+        data["sqrtg"] = sqrtg*psi_s
         data["Bmag"] = Bmag
         data["dBdt"] = dBdt
         data["dBdz"] = dBdz
@@ -343,7 +342,7 @@ class Field(eqx.Module):
         data["B_sub_z"] = B_sub_z
         data["B_sup_t"] = B_sup_t
         data["B_sup_z"] = B_sup_z
-        data["psi_r"] = 2 * jnp.sqrt(s) / Aminor_p
+        data["psi_r"] = psi_s * 2 * jnp.sqrt(s) / Aminor_p
         data["iota"] = iota
         data["B0"] = B0
 

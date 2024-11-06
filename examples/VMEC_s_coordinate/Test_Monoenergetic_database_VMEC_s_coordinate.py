@@ -7,6 +7,8 @@ import jax.numpy as jnp
 import numpy as np
 import h5py as h5
 from netCDF4 import Dataset
+import interpax
+import matplotlib.pyplot as plt
 
 
 #Resolution parameters
@@ -19,8 +21,10 @@ nl=100
 #eq='wout_QI_nfp2_initial_hires.nc'
 #
 #Setting VMEC equilibrium and boozer file (needed for correct conversion factors)
-eq='wout_QI_nfp2_newNT_opt_hires.nc'
-booz='boozermn_wout_QI_nfp2_newNT_opt_hires.nc'
+#eq='wout_QI_nfp2_newNT_opt_hires.nc'
+#booz='boozermn_wout_QI_nfp2_newNT_opt_hires.nc'
+eq='wout_hydra_Np04_20190108.fix001.03.890_12x12.nc'
+booz='boozermn_wout_hydra_Np04_20190108.fix001.03.890_12x12.nc'
 vmec=eq
 
 #Typical rho, nu/v and E_rtilde/(v B0) values used in DKES IPP databases 
@@ -52,7 +56,6 @@ vp = vfile.variables["vp"][:].filled()
 phi = vfile.variables["phi"][:].filled()  
 iotaf = vfile.variables["iotaf"][:].filled()
 phipf = vfile.variables["phipf"][:].filled()                                
-psipf = iotaf*phipf  
 Psia=jnp.abs(phi[-1])/(2.*jnp.pi)
 vfile.close()
 bmnc_b=bfile.variables["bmnc_b"][:].filled() 
@@ -78,14 +81,12 @@ dVdr=interpax.Interpolator1D(rho_half[1:],vp[1:],extrap=True)
 I=interpax.Interpolator1D(rho_half[1:],buco[1:],extrap=True)
 G=interpax.Interpolator1D(rho_half[1:],bvco[1:],extrap=True)
 iota=interpax.Interpolator1D(rho_full[:],iotaf[:],extrap=True)
-psip=interpax.Interpolator1D(rho_full[:],psipf[:],extrap=True)
 
 B00_rho=B00(rho)
 R00_rho=R00(rho)
 I_rho=I(rho)
 G_rho=G(rho)
 iota_rho=iota(rho)
-psip_rho=psip(rho)
 dPsidrtilde=rho*a_b*B00_rho
 drds=a_b/(rho*2.)
 dr_tildedr=2.*Psia/(a_b**2*B00_rho)
@@ -103,7 +104,7 @@ Fac_MONKES_TO_SFINCS_31=(4.*B00_rho*Psia/(np.sqrt(jnp.pi)*G_rho))
 Fac_MONKES_TO_SFINCS_33=1. #tODO
 
 #Factor to convert from SFINCS  in VMEC 'psi' coordinate to Gamma_hat in DKES IPP which uses r_tilde coordinate, see H. Smith notes on this, or appendix of Electron root paper
-Fac_SFINCS_TO_DKES_11=1.(8.*(G_rho+iota_rho*I_rho)/(G_rho**2*B00_rho*jnp.sqrt(jnp.pi))*dPsidrtilde**2)
+Fac_SFINCS_TO_DKES_11=1./(8.*(G_rho+iota_rho*I_rho)/(G_rho**2*B00_rho*jnp.sqrt(jnp.pi))*dPsidrtilde**2)
 Fac_SFINCS_TO_DKES_31=1./(4./(G_rho*jnp.sqrt(jnp.pi))*dPsidrtilde)
 Fac_SFINCS_TO_DKES_33=1./(-2./(G_rho+iota_rho*I_rho*jnp.sqrt(jnp.pi))*B00_rho)
 
@@ -112,6 +113,7 @@ Fac_DKES_TO_D11star=-8/jnp.pi*iota_rho*R00_rho*jnp.square(B00_rho)/jnp.square(B0
 epsilon_t=rho*a_b/R00_rho
 Fac_DKES_TO_D31star=-3./1.46*iota_rho*jnp.sqrt(epsilon_t)/2.
 Fac_DKES_TO_D33star=1.#todo
+
 
 
 #SFINCS results in DKES IPP Gamma_hat format for benchmark, using an electron root optimised equilibrium
@@ -141,14 +143,16 @@ Estar_0p6_Opt=sfincs1['xEr'][()][0]
 sfincs1.close()
 
 sfincs1=h5.File('DKES_rho_0.75.h5','r')
-Gamma11_0p75=sfincs1['Gamma11'][()]
-Estar_0p75_Opt=sfincs1['xEr'][()][0]
+Gamma11_0p7=sfincs1['Gamma11'][()]
+Estar_0p7_Opt=sfincs1['xEr'][()][0]
 sfincs1.close()
 
 sfincs1=h5.File('DKES_rho_0.875.h5','r')
 Gamma11_0p8=sfincs1['Gamma11'][()]
 Estar_0p8_Opt=sfincs1['xEr'][()][0]
 sfincs1.close()
+
+
 
 
 #Create arrays for Dij's monoenergetic scan data 
@@ -162,7 +166,7 @@ D33=np.zeros((len(rho),len(nu_v),len(Er_tilde)))
 #Use internal solve as we do not care for species information in the monoenergetic database
 #Using normal for loop here as it serves only for benchmark-> put into vmap to speed up in real calculations
 for si in range(len(rho)):
-    field = monkes.Field.from_vmec(eq, rho[si]**2, nt, nz)     
+    field = monkes.Field.from_vmec_s(eq, rho[si]**2, nt, nz)     
     for j in range(len(nu_v)):       
         for i in range(len(Er_tilde)):
             #Here we use input 
@@ -180,7 +184,7 @@ for si in range(len(rho)):
 
 
 #Write data in hdf5 file
-file=h5.File('Dij_bench_Opt_DKES_CORRECT_TEST_FULL.h5','w')
+file=h5.File('Dij_BENCHMARK_hydra.h5','w')
 file['rho']=rho
 file['nu_v']=nu_v
 file['Er']=Er
@@ -207,8 +211,10 @@ file.close()
 print('Ended')
 
 
+
+
 #Read the file again for ploting the benchmarks
-Opt=h5.File('Dij_bench_Opt_DKES_CORRECT_TEST_FULL.h5','r')
+Opt=h5.File('Dij_BENCHMARK.h5','r')
 nu_v=Opt['nu_v'][()]
 D11_Opt_DKES=Opt['D11'][()]
 D31_Opt_DKES=Opt['D31'][()]
@@ -226,45 +232,46 @@ Opt.close()
 
 
 
-plt.loglog(nu_v,D11_Opt_DKES[0,:,:],'x')
-plt.loglog(nu_v,-Gamma11_0p1[::-1,:]*Fac_DKES_Opt_DKES[0]*Fac_SFINCS_Opt_DKES[0],'o')
+
+
+plt.loglog(nu_v,-Gamma11_0p1[::-1,:],'o')
+plt.loglog(nu_v,D11_Opt_DKES[0,:,:]*Fac_MONKES_TO_SFINCS_11_OPT[0]*Fac_SFINCS_TO_DKES_11_OPT[0],'x')
+plt.xlabel('$\\nu/v$')
+plt.ylabel('$\\hat{\Gamma}^{IPP_DKES}_{11}$')
 plt.show()
 
-plt.loglog(nu_v,D11_Opt_DKES[1,:,:],'x')
-plt.loglog(nu_v,-Gamma11_0p2[::-1,:]*Fac_DKES_Opt_DKES[1]*Fac_SFINCS_Opt_DKES[1],'o')
+plt.loglog(nu_v,-Gamma11_0p2[::-1,:],'o')
+plt.loglog(nu_v,D11_Opt_DKES[1,:,:]*Fac_MONKES_TO_SFINCS_11_OPT[1]*Fac_SFINCS_TO_DKES_11_OPT[1],'x')
+plt.xlabel('$\\nu/v$')
+plt.ylabel('$\\hat{\Gamma}^{IPP_DKES}_{11}$')
 plt.show()
 
-plt.loglog(nu_v,D11_Opt_DKES[2,:,:],'x')
-plt.loglog(nu_v[1:],-Gamma11_0p3[::-1,:]*Fac_DKES_Opt_DKES[2]*Fac_SFINCS_Opt_DKES[2],'o')
+plt.loglog(nu_v[1:],-Gamma11_0p3[::-1,:],'o')
+plt.loglog(nu_v,D11_Opt_DKES[2,:,:]*Fac_MONKES_TO_SFINCS_11_OPT[2]*Fac_SFINCS_TO_DKES_11_OPT[2],'x')
+plt.xlabel('$\\nu/v$')
+plt.ylabel('$\\hat{\Gamma}^{IPP_DKES}_{11}$')
 plt.show()
 
-plt.loglog(nu_v,D11_Opt_DKES[3,:,:],'x')
-plt.loglog(nu_v[1:],-Gamma11_0p5[::-1,:]*Fac_DKES_Opt_DKES[3]*Fac_SFINCS_Opt_DKES[3],'o')
+plt.loglog(nu_v[1:],-Gamma11_0p5[::-1,:],'o')
+plt.loglog(nu_v,D11_Opt_DKES[3,:,:]*Fac_MONKES_TO_SFINCS_11_OPT[3]*Fac_SFINCS_TO_DKES_11_OPT[3],'x')
+plt.xlabel('$\\nu/v$')
+plt.ylabel('$\\hat{\Gamma}^{IPP_DKES}_{11}$')
 plt.show()
 
-plt.loglog(nu_v,D11_Opt_DKES[4,:,:],'x')
-plt.loglog(nu_v[1:],-Gamma11_0p6[::-1,:]*Fac_DKES_Opt_DKES[4]*Fac_SFINCS_Opt_DKES[4],'o')
+plt.loglog(nu_v[1:],-Gamma11_0p6[::-1,:],'o')
+plt.loglog(nu_v,D11_Opt_DKES[4,:,:]*Fac_MONKES_TO_SFINCS_11_OPT[4]*Fac_SFINCS_TO_DKES_11_OPT[4],'x')
+plt.xlabel('$\\nu/v$')
+plt.ylabel('$\\hat{\Gamma}^{IPP_DKES}_{11}$')
 plt.show()
 
-plt.loglog(nu_v,D11_Opt_DKES[5,:,:],'x')
-plt.loglog(nu_v[1:],-Gamma11_0p75[::-1,:]*Fac_DKES_Opt_DKES[5]*Fac_SFINCS_Opt_DKES[5],'o')
+plt.loglog(nu_v[1:],-Gamma11_0p7[::-1,:],'o')
+plt.loglog(nu_v,D11_Opt_DKES[5,:,:]*Fac_MONKES_TO_SFINCS_11_OPT[5]*Fac_SFINCS_TO_DKES_11_OPT[5],'x')
+plt.xlabel('$\\nu/v$')
+plt.ylabel('$\\hat{\Gamma}^{IPP_DKES}_{11}$')
 plt.show()
 
-plt.loglog(nu_v,D11_Opt_DKES[6,:,:]/(Fac_DKES_Opt_DKES[6]*Fac_SFINCS_Opt_DKES[6]),'x')
 plt.loglog(nu_v[1:],-Gamma11_0p8[::-1,:],'o')
-plt.show()
-
-
-plt.loglog(nu_v,D11_Opt_DKES[3,:,:],'x')
-plt.loglog(nu_v[1:],-Gamma11_0p5[::-1,:]*Fac_DKES[3]*Fac_SFINCS[3],'o')
-plt.show()
-
-
-plt.loglog(nu_v,D11_hydra_DKES[0,:,:],'x')
-plt.loglog(nu_v,-Gamma11_0p1_Hydra[::-1,:]*Fac_DKES_Hydra_DKES[0]*Fac_SFINCS_Hydra_DKES[0],'o')
-plt.show()
-
-
-plt.loglog(nu_v,D11_hydra_DKES[3,:,:],'x')
-plt.loglog(nu_v[1:],-Gamma11_0p5_Hydra[::-1,:]*Fac_DKES_Hydra_DKES[3]*Fac_SFINCS_Hydra_DKES[3],'o')
+plt.loglog(nu_v,D11_Opt_DKES[6,:,:]*Fac_MONKES_TO_SFINCS_11_OPT[6]*Fac_SFINCS_TO_DKES_11_OPT[6],'x')
+plt.xlabel('$\\nu/v$')
+plt.ylabel('$\\hat{\Gamma}^{IPP_DKES}_{11}$')
 plt.show()

@@ -146,7 +146,7 @@ class GlobalMaxwellian(eqx.Module):
 
 
 def collisionality(
-    maxwellian_a: LocalMaxwellian, v: float, *others: LocalMaxwellian, electrons: LocalMaxwellian
+    maxwellian_a: LocalMaxwellian, v: float, *others: LocalMaxwellian
 ) -> float:
     """Collisionality between species a and others.
 
@@ -165,13 +165,13 @@ def collisionality(
         Collisionality of species a against background of others, in units of 1/s
     """
     nu = 0.0
-    for ma in others:
-        nu += nuD_ab(maxwellian_a, ma, v,electrons)
+    for ma in others + (maxwellian_a,):
+        nu += nuD_ab(maxwellian_a, ma, v)
     return nu
 
 
 def nuD_ab(
-    maxwellian_a: LocalMaxwellian, maxwellian_b: LocalMaxwellian, v: float,electrons: LocalMaxwellian
+    maxwellian_a: LocalMaxwellian, maxwellian_b: LocalMaxwellian, v: float
 ) -> float:
     """Pairwise collision freq. for species a colliding with species b at velocity v.
 
@@ -192,34 +192,34 @@ def nuD_ab(
     """
     nb = maxwellian_b.density
     vtb = maxwellian_b.v_thermal
-    prefactor = gamma_ab(maxwellian_a, maxwellian_b, v,electrons) * nb / v**3
+    prefactor = gamma_ab(maxwellian_a, maxwellian_b, v) * nb / v**3
     erf_part = jax.scipy.special.erf(v / vtb) - chandrasekhar(v / vtb)
     return prefactor * erf_part
 
 
 def gamma_ab(
-    maxwellian_a: LocalMaxwellian, maxwellian_b: LocalMaxwellian, v: float, electrons: LocalMaxwellian
+    maxwellian_a: LocalMaxwellian, maxwellian_b: LocalMaxwellian, v: float
 ) -> float:
     """Prefactor for pairwise collisionality."""
-    lnlambda = coulomb_logarithm(maxwellian_a, maxwellian_b,electrons)
+    lnlambda = coulomb_logarithm(maxwellian_a, maxwellian_b)
     ea, eb = maxwellian_a.species.charge, maxwellian_b.species.charge
     ma = maxwellian_a.species.mass
     return ea**2 * eb**2 * lnlambda / (4 * jnp.pi * epsilon_0**2 * ma**2)
 
 
 def nupar_ab(
-    maxwellian_a: LocalMaxwellian, maxwellian_b: LocalMaxwellian, v: float, electrons: LocalMaxwellian
+    maxwellian_a: LocalMaxwellian, maxwellian_b: LocalMaxwellian, v: float
 ) -> float:
     """Parallel collisionality."""
     nb = maxwellian_b.density
     vtb = maxwellian_b.v_thermal
     return (
-        2 * gamma_ab(maxwellian_a, maxwellian_b, v,electrons) * nb / v**3 * chandrasekhar(v / vtb)
+        2 * gamma_ab(maxwellian_a, maxwellian_b, v) * nb / v**3 * chandrasekhar(v / vtb)
     )
 
 
 def coulomb_logarithm(
-    maxwellian_a: LocalMaxwellian, maxwellian_b: LocalMaxwellian,electrons: LocalMaxwellian
+    maxwellian_a: LocalMaxwellian, maxwellian_b: LocalMaxwellian
 ) -> float:
     """Coulomb logarithm for collisions between species a and b.
 
@@ -235,30 +235,9 @@ def coulomb_logarithm(
     log(lambda) : float
 
     """
-    #bmin, bmax =   #impact_parameter(maxwellian_a, maxwellian_b[0])
-    #return jnp.log(bmax / bmin)
-    lnL = 25.3 + 1.15*jnp.log10(electrons.temperature**2/electrons.density)  
-    return lnL
+    bmin, bmax = impact_parameter(maxwellian_a, maxwellian_b)
+    return jnp.log(bmax / bmin)
 
-#def coulomb_logarithm(
-#    maxwellian_a: LocalMaxwellian, maxwellian_b: LocalMaxwellian
-#) -> float:
-#    """Coulomb logarithm for collisions between species a and b.
-#
-#    Parameters
-#    ----------
-#    maxwellian_a : LocalMaxwellian
-#        Distribution function of primary species.
-#    maxwellian_b : LocalMaxwellian
-#        Distribution function of background species.
-#
-#    Returns
-#    -------
-#    log(lambda) : float
-#
-#    """
-#    bmin, bmax = impact_parameter(maxwellian_a, maxwellian_b)
-#    return jnp.log(bmax / bmin)
 
 def impact_parameter(
     maxwellian_a: LocalMaxwellian, maxwellian_b: LocalMaxwellian

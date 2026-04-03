@@ -61,6 +61,7 @@ class Field(eqx.Module):
     Bmag_fsa: float
     B2mag_fsa: float
     psi_r: float
+    iota: float
     B0: float
     ntheta: int = eqx.field(static=True)
     nzeta: int = eqx.field(static=True)
@@ -77,6 +78,7 @@ class Field(eqx.Module):
         Bmag: Float[Array, "ntheta nzeta"],
         sqrtg: Float[Array, "ntheta nzeta"],
         psi_r: float,
+        iota: float,
         NFP: int = 1,
         *,
         deriv_mode: str = "fft",
@@ -116,10 +118,11 @@ class Field(eqx.Module):
         self.Bmag_fsa = self.flux_surface_average(self.Bmag)
         self.B2mag_fsa = self.flux_surface_average(self.Bmag**2)
         self.psi_r = psi_r
+        self.iota = iota
         self.theta = jnp.linspace(0, 2 * np.pi, self.ntheta, endpoint=False)
         self.zeta = jnp.linspace(0, 2 * np.pi / NFP, self.nzeta, endpoint=False)
         self.wtheta = jnp.diff(self.theta, append=jnp.array([2 * jnp.pi]))
-        self.wzeta = jnp.diff(self.theta, append=jnp.array([2 * jnp.pi / NFP]))
+        self.wzeta = jnp.diff(self.zeta, append=jnp.array([2 * jnp.pi / NFP]))
 
     @classmethod
     def from_desc(
@@ -156,6 +159,7 @@ class Field(eqx.Module):
             "|B|_z",
             "sqrt(g)",
             "psi_r",
+            "iota",
             "a",
         ]
         desc_data = eq.compute(keys, grid=grid)
@@ -178,16 +182,16 @@ class Field(eqx.Module):
         return cls(
             rho=rho,
             psi_r=desc_data["psi_r"][0] / desc_data["a"],
+            iota=desc_data["iota"][0],
             **data,
             NFP=eq.NFP,
             deriv_mode=deriv_mode,
         )
 
     @classmethod
-    def from_vmec(
-        cls, wout, s: float, ntheta: int, nzeta: int, deriv_mode: str = "fft"
-    ):
+    def from_vmec_desc(cls, wout, s: float, ntheta: int, nzeta: int):
         """Construct Field from VMEC equilibrium.
+
 
         Parameters
         ----------
@@ -197,12 +201,374 @@ class Field(eqx.Module):
             Flux surface label.
         ntheta, nzeta : int
             Number of points on a surface in poloidal and toroidal directions.
-        deriv_mode : {"fft", "fd2", "fd4", "fd6"}
-            Method to use for approximating poloidal and toroidal derivatives.
-            "fft" uses spectral differentiation of the Fourier series, fd{2,4,6} uses
-            centered finite differences of the specified order.
         """
-        raise NotImplementedError
+
+        assert (ntheta % 2 == 1) and (nzeta % 2 == 1), "ntheta and nzeta must be odd"
+
+        from desc.grid import LinearGrid
+        from desc.vmec import VMECIO
+
+        rho=jnp.sqrt(s)
+        eq=VMECIO.load(wout)
+
+        grid = LinearGrid(rho=rho, theta=ntheta, zeta=nzeta, endpoint=False, NFP=eq.NFP)
+        keys = [
+            "B^theta",
+            "B^zeta",
+            "B_theta",
+            "B_zeta",
+            "|B|",
+            "sqrt(g)",
+            "psi_r",
+            "a",
+        ]
+        desc_data = eq.compute(keys, grid=grid)
+
+        data = {
+            "B_sup_t": desc_data["B^theta"],
+            "B_sup_z": desc_data["B^zeta"],
+            "B_sub_t": desc_data["B_theta"],
+            "B_sub_z": desc_data["B_zeta"],
+            "Bmag": desc_data["|B|"],
+#            "sqrtg": desc_data["sqrt(g)"] ,
+            "sqrtg": desc_data["sqrt(g)"] / desc_data["psi_r"],
+ #           "sqrtg": desc_data["sqrt(g)"] / (desc_data["psi_r"]*desc_data["a"]),
+        }
+
+        data = {
+            key: val.reshape((grid.num_theta, grid.num_zeta), order="F")
+            for key, val in data.items()
+        }
+        return cls(
+            rho=rho, psi_r=desc_data["psi_r"][0] / desc_data["a"], **data, NFP=eq.NFP
+  #          rho=rho, psi_r=desc_data["psi_r"][0] / desc_data["a"]*desc_data["a"], **data, NFP=eq.NFP
+        )
+
+
+
+    #Electric field input as r and output in r instead of psi (using VMEC reader)
+    @classmethod
+    def from_vmec_full_r(cls,
+        vmec,
+        s: float,
+        ntheta: int,
+        nzeta: int,
+        cutoff: float = 0.0,
+        deriv_mode: str = "fft",
+    ):
+        """Construct Field from BOOZ_XFORM file.
+
+        Parameters
+        ----------
+        vmec : path-like
+            Path to booz_xform wout file.
+        s : float
+            Flux surface label.
+        ntheta, nzeta : int
+            Number of points on a surface in poloidal and toroidal directions.
+        """
+        assert (ntheta % 2 == 1) and (nzeta % 2 == 1), "ntheta and nzeta must be odd"
+        from netCDF4 import Dataset
+
+        file = Dataset(vmec, mode="r")
+
+        ns = file.variables["ns"][:].filled()
+        nfp = file.variables["nfp"][:].filled()
+        #print('ns',ns)
+        #print('nfp',nfp)
+        theta = jnp.linspace(0, 2 * np.pi, ntheta, endpoint=False)
+        zeta = jnp.linspace(0, 2 * np.pi / nfp, nzeta, endpoint=False)
+        #assert "bmns" not in file.variables, "non-symmetric booz-xform not supported"
+
+        s_full = jnp.linspace(0, 1, ns)
+        hs = 1 / (ns - 1)
+        s_half = s_full[0:-1] + hs / 2
+        #s_half = jnp.array([(i-0.5)/(ns-1) for i in range(1,ns)])
+        #print(s_half.shape)
+
+        volume = file.variables["volume_p"][:].filled()
+        Aminor_p = file.variables["Aminor_p"][:].filled()    
+        Rmajor_p = file.variables["Rmajor_p"][:].filled() 
+        aspect = file.variables["aspect"][:].filled()                   
+        r_mnc = file.variables["rmnc"][:].filled()
+        g_mnc = file.variables["gmnc"][:].filled()
+        b_mnc = file.variables["bmnc"][:].filled()
+        bsupu_mnc = file.variables["bsupumnc"][:].filled()
+        bsupv_mnc = file.variables["bsupvmnc"][:].filled()
+        bsubu_mnc = file.variables["bsubumnc"][:].filled()
+        bsubv_mnc = file.variables["bsubvmnc"][:].filled()
+        nfp = file.variables["nfp"][:].filled()
+        iota = file.variables["iotaf"][:].filled()
+        psi_s = file.variables["phipf"][:].filled()
+        
+
+
+        # assuming the field is only over a single flux surface s
+        g_mnc = interpax.interp1d(s, s_half, g_mnc[1:,:])
+        b_mnc = interpax.interp1d(s, s_half, b_mnc[1:,:])
+        bsupu_mnc = interpax.interp1d(s, s_half, bsupu_mnc[1:,:])
+        bsupv_mnc = interpax.interp1d(s, s_half, bsupv_mnc[1:,:])
+        bsubu_mnc = interpax.interp1d(s, s_half, bsubu_mnc[1:,:])
+        bsubv_mnc = interpax.interp1d(s, s_half, bsubv_mnc[1:,:])
+        iota = -interpax.interp1d(s, s_full, iota)  # Not necessary but to match boozer we need it here
+
+        psi_s = interpax.interp1d(s, s_full, psi_s)/(2.*jnp.pi)
+        #xm = file.variables["xm"][:].filled()
+        #xn = file.variables["xn"][:].filled()
+        xm = file.variables["xm_nyq"][:].filled()  
+        xn = file.variables["xn_nyq"][:].filled()  
+
+        sqrtg = vmec_eval(theta[:, None], zeta[None, :], g_mnc, 0, xm, xn)
+        Bmag = vmec_eval(theta[:, None], zeta[None, :], b_mnc, 0, xm, xn)
+        B_sub_t = vmec_eval(theta[:, None], zeta[None, :], bsubu_mnc, 0, xm, xn)
+        B_sub_z = vmec_eval(theta[:, None], zeta[None, :], bsubv_mnc, 0, xm, xn)                        
+        B_sup_t = vmec_eval(theta[:, None], zeta[None, :], bsupu_mnc, 0, xm, xn)
+        B_sup_z = vmec_eval(theta[:, None], zeta[None, :], bsupv_mnc, 0, xm, xn)    
+
+        #Copied from recent booz_xform reader changes but need to understand
+        B0 = jnp.abs(b_mnc).max()
+        mask = jnp.abs(b_mnc) > cutoff * B0
+
+        dBdt = vmec_eval(theta[:, None], zeta[None, :], b_mnc * mask, 0, xm, xn, dt=1)
+        dBdz = vmec_eval(theta[:, None], zeta[None, :], b_mnc * mask, 0, xm, xn, dz=1)
+
+
+        #print(B_sub_t)
+        #a_minor = R0 / aspect
+        #a_minor=2.01879
+        r_s=1./(2 * jnp.sqrt(s) / Aminor_p)
+        data = {}
+        data["sqrtg"] = sqrtg/r_s
+        data["Bmag"] = Bmag
+        data["dBdt"] = dBdt
+        data["dBdz"] = dBdz
+        data["B_sub_t"] = B_sub_t
+        data["B_sub_z"] = B_sub_z
+        data["B_sup_t"] = B_sup_t*r_s
+        data["B_sup_z"] = B_sup_z*r_s
+        data["psi_r"] = 1.#psi_s * 2 * jnp.sqrt(s) / Aminor_p
+        data["iota"] = iota
+        data["B0"] = B0
+
+        return cls(rho=jnp.sqrt(s), **data, NFP=nfp, deriv_mode=deriv_mode)
+
+
+    @classmethod
+    def from_vmec(cls,
+        vmec,
+        s: float,
+        ntheta: int,
+        nzeta: int,
+        cutoff: float = 0.0,
+        deriv_mode: str = "fft",
+    ):
+        """Construct Field from BOOZ_XFORM file.
+
+        Parameters
+        ----------
+        vmec : path-like
+            Path to booz_xform wout file.
+        s : float
+            Flux surface label.
+        ntheta, nzeta : int
+            Number of points on a surface in poloidal and toroidal directions.
+        """
+        assert (ntheta % 2 == 1) and (nzeta % 2 == 1), "ntheta and nzeta must be odd"
+        from netCDF4 import Dataset
+
+        file = Dataset(vmec, mode="r")
+
+        ns = file.variables["ns"][:].filled()
+        nfp = file.variables["nfp"][:].filled()
+        #print('ns',ns)
+        #print('nfp',nfp)
+        theta = jnp.linspace(0, 2 * np.pi, ntheta, endpoint=False)
+        zeta = jnp.linspace(0, 2 * np.pi / nfp, nzeta, endpoint=False)
+        #assert "bmns" not in file.variables, "non-symmetric booz-xform not supported"
+
+        s_full = jnp.linspace(0, 1, ns)
+        hs = 1 / (ns - 1)
+        s_half = s_full[0:-1] + hs / 2
+        #s_half = jnp.array([(i-0.5)/(ns-1) for i in range(1,ns)])
+        #print(s_half.shape)
+
+        volume = file.variables["volume_p"][:].filled()
+        Aminor_p = file.variables["Aminor_p"][:].filled()    
+        Rmajor_p = file.variables["Rmajor_p"][:].filled() 
+        aspect = file.variables["aspect"][:].filled()                   
+        r_mnc = file.variables["rmnc"][:].filled()
+        g_mnc = file.variables["gmnc"][:].filled()
+        b_mnc = file.variables["bmnc"][:].filled()
+        bsupu_mnc = file.variables["bsupumnc"][:].filled()
+        bsupv_mnc = file.variables["bsupvmnc"][:].filled()
+        bsubu_mnc = file.variables["bsubumnc"][:].filled()
+        bsubv_mnc = file.variables["bsubvmnc"][:].filled()
+        nfp = file.variables["nfp"][:].filled()
+        iota = file.variables["iotaf"][:].filled()
+        psi_s = file.variables["phipf"][:].filled()
+        
+
+
+        # assuming the field is only over a single flux surface s
+        g_mnc = interpax.interp1d(s, s_half, g_mnc[1:,:])
+        b_mnc = interpax.interp1d(s, s_half, b_mnc[1:,:])
+        bsupu_mnc = interpax.interp1d(s, s_half, bsupu_mnc[1:,:])
+        bsupv_mnc = interpax.interp1d(s, s_half, bsupv_mnc[1:,:])
+        bsubu_mnc = interpax.interp1d(s, s_half, bsubu_mnc[1:,:])
+        bsubv_mnc = interpax.interp1d(s, s_half, bsubv_mnc[1:,:])
+        iota = -interpax.interp1d(s, s_full, iota)  # Not necessary but to match boozer we need it here
+
+        psi_s = interpax.interp1d(s, s_full, psi_s)/(2.*jnp.pi)
+        #xm = file.variables["xm"][:].filled()
+        #xn = file.variables["xn"][:].filled()
+        xm = file.variables["xm_nyq"][:].filled()  
+        xn = file.variables["xn_nyq"][:].filled()  
+
+        sqrtg = vmec_eval(theta[:, None], zeta[None, :], g_mnc, 0, xm, xn)
+        Bmag = vmec_eval(theta[:, None], zeta[None, :], b_mnc, 0, xm, xn)
+        B_sub_t = vmec_eval(theta[:, None], zeta[None, :], bsubu_mnc, 0, xm, xn)
+        B_sub_z = vmec_eval(theta[:, None], zeta[None, :], bsubv_mnc, 0, xm, xn)                        
+        B_sup_t = vmec_eval(theta[:, None], zeta[None, :], bsupu_mnc, 0, xm, xn)
+        B_sup_z = vmec_eval(theta[:, None], zeta[None, :], bsupv_mnc, 0, xm, xn)    
+
+        #Copied from recent booz_xform reader changes but need to understand
+        B0 = jnp.abs(b_mnc).max()
+        mask = jnp.abs(b_mnc) > cutoff * B0
+
+        dBdt = vmec_eval(theta[:, None], zeta[None, :], b_mnc * mask, 0, xm, xn, dt=1)
+        dBdz = vmec_eval(theta[:, None], zeta[None, :], b_mnc * mask, 0, xm, xn, dz=1)
+
+
+        #print(B_sub_t)
+        #a_minor = R0 / aspect
+        #a_minor=2.01879
+        data = {}
+        data["sqrtg"] = sqrtg/psi_s
+        data["Bmag"] = Bmag
+        data["dBdt"] = dBdt
+        data["dBdz"] = dBdz
+        data["B_sub_t"] = B_sub_t
+        data["B_sub_z"] = B_sub_z
+        data["B_sup_t"] = B_sup_t*psi_s
+        data["B_sup_z"] = B_sup_z*psi_s
+        data["psi_r"] = psi_s * 2 * jnp.sqrt(s) / Aminor_p
+        data["iota"] = iota
+        data["B0"] = B0
+
+        return cls(rho=jnp.sqrt(s), **data, NFP=nfp, deriv_mode=deriv_mode)
+
+
+
+    @classmethod
+    def from_vmec_s(cls,
+        vmec,
+        s: float,
+        ntheta: int,
+        nzeta: int,
+        cutoff: float = 0.0,
+        deriv_mode: str = "fft",
+    ):
+        """Construct Field from BOOZ_XFORM file.
+
+        Parameters
+        ----------
+        vmec : path-like
+            Path to booz_xform wout file.
+        s : float
+            Flux surface label.
+        ntheta, nzeta : int
+            Number of points on a surface in poloidal and toroidal directions.
+        """
+        assert (ntheta % 2 == 1) and (nzeta % 2 == 1), "ntheta and nzeta must be odd"
+        from netCDF4 import Dataset
+
+        file = Dataset(vmec, mode="r")
+
+        ns = file.variables["ns"][:].filled()
+        nfp = file.variables["nfp"][:].filled()
+        #print('ns',ns)
+        #print('nfp',nfp)
+        theta = jnp.linspace(0, 2 * np.pi, ntheta, endpoint=False)
+        zeta = jnp.linspace(0, 2 * np.pi / nfp, nzeta, endpoint=False)
+        #assert "bmns" not in file.variables, "non-symmetric booz-xform not supported"
+
+        s_full = jnp.linspace(0, 1, ns)
+        hs = 1 / (ns - 1)
+        s_half = s_full[0:-1] + hs / 2
+        #s_half = jnp.array([(i-0.5)/(ns-1) for i in range(1,ns)])
+        #print(s_half.shape)
+
+        volume = file.variables["volume_p"][:].filled()
+        Aminor_p = file.variables["Aminor_p"][:].filled()    
+        Rmajor_p = file.variables["Rmajor_p"][:].filled() 
+        aspect = file.variables["aspect"][:].filled()                   
+        r_mnc = file.variables["rmnc"][:].filled()
+        g_mnc = file.variables["gmnc"][:].filled()
+        b_mnc = file.variables["bmnc"][:].filled()
+        bsupu_mnc = file.variables["bsupumnc"][:].filled()
+        bsupv_mnc = file.variables["bsupvmnc"][:].filled()
+        bsubu_mnc = file.variables["bsubumnc"][:].filled()
+        bsubv_mnc = file.variables["bsubvmnc"][:].filled()
+        #print(g_mnc[0,:])
+        #print(g_mnc[1,:])
+        nfp = file.variables["nfp"][:].filled()
+        iota = file.variables["iotaf"][:].filled()
+        psi_s = file.variables["phi"][:].filled()
+        phi = file.variables["phi"][:].filled()
+        #psi_s=psi_s/psi_s[-1]
+        #print('phi',phi)
+
+        # assuming the field is only over a single flux surface s
+        g_mnc = interpax.interp1d(s, s_half, g_mnc[1:,:])
+        b_mnc = interpax.interp1d(s, s_half, b_mnc[1:,:])
+        bsupu_mnc = interpax.interp1d(s, s_half, bsupu_mnc[1:,:])
+        bsupv_mnc = interpax.interp1d(s, s_half, bsupv_mnc[1:,:])
+        bsubu_mnc = interpax.interp1d(s, s_half, bsubu_mnc[1:,:])
+        bsubv_mnc = interpax.interp1d(s, s_half, bsubv_mnc[1:,:])
+        iota = -interpax.interp1d(s, s_full, iota)  # Not necessary but to match boozer we need it here
+
+        psi_s = interpax.interp1d(s, s_full, psi_s) # Not necessary? but to match boozer we need it here
+
+        #xm = file.variables["xm"][:].filled()
+        #xn = file.variables["xn"][:].filled()
+        xm = file.variables["xm_nyq"][:].filled()  
+        xn = file.variables["xn_nyq"][:].filled()  
+
+        sqrtg = vmec_eval(theta[:, None], zeta[None, :], g_mnc, 0, xm, xn)
+        Bmag = vmec_eval(theta[:, None], zeta[None, :], b_mnc, 0, xm, xn)
+        B_sub_t = vmec_eval(theta[:, None], zeta[None, :], bsubu_mnc, 0, xm, xn)
+        B_sub_z = vmec_eval(theta[:, None], zeta[None, :], bsubv_mnc, 0, xm, xn)                        
+        B_sup_t = vmec_eval(theta[:, None], zeta[None, :], bsupu_mnc, 0, xm, xn)
+        B_sup_z = vmec_eval(theta[:, None], zeta[None, :], bsupv_mnc, 0, xm, xn)    
+
+        #Copied from recent booz_xform reader changes but need to understand
+        B0 = jnp.abs(b_mnc).max()
+        mask = jnp.abs(b_mnc) > cutoff * B0
+
+        dBdt = vmec_eval(theta[:, None], zeta[None, :], b_mnc * mask, 0, xm, xn, dt=1)
+        dBdz = vmec_eval(theta[:, None], zeta[None, :], b_mnc * mask, 0, xm, xn, dz=1)
+
+
+        #print(B_sub_t)
+        #a_minor = R0 / aspect
+        #a_minor=2.01879
+        data = {}
+        data["sqrtg"] = sqrtg#*phi[-1]
+        data["Bmag"] = Bmag
+        data["dBdt"] = dBdt
+        data["dBdz"] = dBdz
+        data["B_sub_t"] = B_sub_t
+        data["B_sub_z"] = B_sub_z
+        data["B_sup_t"] = B_sup_t
+        data["B_sup_z"] = B_sup_z
+        data["psi_r"] = 1.#phi[-1] * 2 * jnp.sqrt(s) / a_minor
+        data["iota"] = iota
+        data["B0"] = B0
+
+        return cls(rho=jnp.sqrt(s), **data, NFP=nfp, deriv_mode=deriv_mode)
+
+
+
 
     @classmethod
     def from_booz_xform(
@@ -274,9 +640,9 @@ class Field(eqx.Module):
         B0 = jnp.abs(b_mnc).max()
         mask = jnp.abs(b_mnc) > cutoff * B0
 
-        Bmag = vmec_eval(theta[:, None], zeta[None, :], b_mnc * mask, 0, xm, xn)
-        dBdt = vmec_eval(theta[:, None], zeta[None, :], b_mnc * mask, 0, xm, xn, dt=1)
-        dBdz = vmec_eval(theta[:, None], zeta[None, :], b_mnc * mask, 0, xm, xn, dz=1)
+        Bmag = vmec_eval(theta[:, None], zeta[None, :], b_mnc * mask, 0, xm, -xn)
+        dBdt = vmec_eval(theta[:, None], zeta[None, :], b_mnc * mask, 0, xm, -xn, dt=1)
+        dBdz = vmec_eval(theta[:, None], zeta[None, :], b_mnc * mask, 0, xm, -xn, dz=1)
 
         sign = jnp.sign(bvco + iota * buco)
         buco *= sign
@@ -292,6 +658,7 @@ class Field(eqx.Module):
         data["B_sup_t"] = iota / sqrtg
         data["B_sup_z"] = 1 / sqrtg
         data["psi_r"] = psi_s * 2 * jnp.sqrt(s) / a_minor
+        data["iota"] = iota
         data["B0"] = B0
 
         return cls(rho=jnp.sqrt(s), **data, NFP=nfp, deriv_mode=deriv_mode)
@@ -479,6 +846,19 @@ class MonoenergeticDKOperator(eqx.Module):
             )
         )
 
+#    @functools.partial(jnp.vectorize, signature="(m,n),()->(m,n)", excluded=[0])
+#    def _Lk(self, f, k):
+#        Lk= (
+#            k
+#            / (2 * k - 1)
+#            * (
+#                self.field.bdotgrad(f)
+#                + (k - 1) / 2 * self.field.bdotgradB * f / self.field.Bmag
+#            )
+#        )
+#    
+#        return jnp.where(k == 0, Lk.at[0, 0].set(0.0), Lk)
+    
     @functools.partial(jnp.vectorize, signature="(m,n),()->(m,n)", excluded=[0])
     def _Dk(self, f, k):
 
@@ -530,9 +910,9 @@ def vmec_eval(t, z, xc, xs, m, n, dt=0, dz=0):
 
 @functools.partial(jnp.vectorize, signature="(),(),(n),(n),(n),(n),(n),(n)->()")
 def _vmec_eval(t, z, xc, xs, m, n, dt, dz):
-    arg = m * t + n * z
+    arg = m * t - n * z
     arg += dt * jnp.pi / 2
-    arg += dz * jnp.pi / 2
+    arg -= dz * jnp.pi / 2
     xc *= m**dt
     xc *= n**dz
     xs *= m**dt

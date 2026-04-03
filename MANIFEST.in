@@ -1,0 +1,3 @@
+# Minimal MANIFEST.in for monkes
+include LICENSE
+include README.md
